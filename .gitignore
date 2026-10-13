@@ -1,0 +1,11 @@
+/build/
+/.deps/
+/.venv/
+__pycache__/
+*.pyc
+*.log
+*.elf
+*.map
+*.o
+/Backup/
+/local-settings.json

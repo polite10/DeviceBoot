@@ -1,0 +1,18 @@
+{
+  "board": "STM32U5A9J-DK",
+  "protocol": 1,
+  "app_base": 134258688,
+  "hardware_passed": true,
+  "hardware_checks": 20,
+  "ui_passed": 266,
+  "ui_failed": 0,
+  "viewmodels_passed": 60,
+  "viewmodels_failed": 0,
+  "settings_preserved": true,
+  "settings_sha256": "efae780b22de4d65208712116c584539e4c0a74a139b98866053df66ee345d0b",
+  "watch_bin_sha256": "d370e51e32f78028d2980d39d772824df2f74093343ac720dac0fc1334812781",
+  "boot_bin_sha256": "10decfe85d5cf81c4f99524ebc6e488a7ddf5e0f62198e12cdcbcf3cbbfcab49",
+  "duello_bin_sha256": "378508d4f2149d4f5106ce9b43d4544bf9cfd86bf4ddecd70562442557bdd7ec",
+  "final_application": "Smartwatch",
+  "scope": "Actual board UART uploads, commands, software resets and aborted-upload recovery. No physical power-loss or long-duration test."
+}
