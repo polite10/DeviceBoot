@@ -9,3 +9,9 @@ __pycache__/
 *.o
 /Backup/
 /local-settings.json
+
+.DS_Store
+
+/commit.json
+
+/source-manifest.json
