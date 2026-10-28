@@ -16,6 +16,11 @@
 #define DEVICE_PROTOCOL 1U
 #define DEVICE_APP_WATCH 1U
 #define DEVICE_APP_DUELLO 2U
+/* 0 and erased Flash (UINT32_MAX) are not application identities. */
+#define DEVICE_APP_ID_MAX 0xFFFFFFFEU
+static inline int device_app_id_valid(uint32_t id) {
+    return id > 0U && id <= DEVICE_APP_ID_MAX;
+}
 typedef struct { uint32_t magic,version,base,max_size,protocol,board,reserved[2]; } device_boot_info_t;
 typedef struct { uint32_t magic,id,version,protocol; } device_app_info_t;
 typedef struct { uint32_t magic,size,crc,id; } device_meta_t;

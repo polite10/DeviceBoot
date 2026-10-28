@@ -6,12 +6,12 @@
 #include <stdbool.h>
 
 __attribute__((section(".boot_info"),used))
-const device_boot_info_t boot_info={DEVICE_BOOT_MAGIC,1,DEVICE_APP_BASE,DEVICE_APP_MAX,1,0x481,{921600,0}};
+const device_boot_info_t boot_info={DEVICE_BOOT_MAGIC,2,DEVICE_APP_BASE,DEVICE_APP_MAX,1,0x481,{921600,DEVICE_APP_ID_MAX}};
 static UART_HandleTypeDef uart;
 static uint32_t image_size,image_crc,image_id,written;
 static bool updating;
 static uint8_t payload[1040] __attribute__((aligned(16)));
-static uint8_t last_response[240];
+static uint8_t last_response[280];
 static uint32_t last_seq,last_request_crc,last_reply_size;
 static bool have_reply;
 static uint32_t crc_table[256];
@@ -54,7 +54,7 @@ static void uart_init(void) {
     if(HAL_UART_Init(&uart)!=HAL_OK)Error_Handler();
 }
 static bool vectors_valid(uint32_t size,uint32_t id) {
-    if(size<0x410 || size>DEVICE_APP_MAX || (id!=1 && id!=2))return false;
+    if(size<0x410 || size>DEVICE_APP_MAX || !device_app_id_valid(id))return false;
     const uint32_t *v=(const uint32_t *)DEVICE_APP_BASE;
     const device_app_info_t *info=(const device_app_info_t *)(DEVICE_APP_BASE+0x400);
     return v[0]>=0x20000000U && v[0]<=DEVICE_RAM_END && !(v[0]&7U) && (v[1]&1) &&
@@ -114,16 +114,16 @@ static void reply(uint32_t seq,uint32_t cmd,uint32_t request_crc,uint32_t status
     transmit_reply();
 }
 static void dispatch(uint32_t *h) {
-    uint32_t cmd=h[2],n=h[3],status=0;char out[190]="{}";
+    uint32_t cmd=h[2],n=h[3],status=0;char out[240]="{}";
     if(cmd==1 || cmd==6) {
         const device_meta_t *m=(const device_meta_t *)DEVICE_META_BASE;
-        snprintf(out,sizeof out,"{\"app\":\"DeviceBoot\",\"version\":1,\"protocol\":1,\"base\":%lu,\"max\":%lu,\"valid\":%s,\"image_id\":%lu,\"written\":%lu}",
-          (unsigned long)DEVICE_APP_BASE,(unsigned long)DEVICE_APP_MAX,app_valid()?"true":"false",(unsigned long)(m->magic==DEVICE_META_MAGIC?m->id:0),(unsigned long)written);
+        snprintf(out,sizeof out,"{\"app\":\"DeviceBoot\",\"version\":2,\"protocol\":1,\"base\":%lu,\"max\":%lu,\"valid\":%s,\"image_id\":%lu,\"written\":%lu,\"max_app_id\":%lu}",
+          (unsigned long)DEVICE_APP_BASE,(unsigned long)DEVICE_APP_MAX,app_valid()?"true":"false",(unsigned long)(m->magic==DEVICE_META_MAGIC?m->id:0),(unsigned long)written,(unsigned long)DEVICE_APP_ID_MAX);
     } else if(cmd==2) {
         if(n!=12)status=1;
         else {
             uint32_t p[3];memcpy(p,payload,12);
-            if(p[0]<0x410 || p[0]>DEVICE_APP_MAX || (p[2]!=1 && p[2]!=2))status=2;
+            if(p[0]<0x410 || p[0]>DEVICE_APP_MAX || !device_app_id_valid(p[2]))status=2;
             else {
                 updating=false;written=0;
                 /* Invalidate BEFORE touching application pages. Interrupted uploads stay in recovery. */

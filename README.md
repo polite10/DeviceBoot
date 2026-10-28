@@ -1,6 +1,6 @@
 # DeviceBoot
 
-STM32U5A9J-DK için küçük custom bootloader. PC'deki [Device Studio](https://github.com/polite10/DeviceStudio), kartın mevcut ST-LINK Micro USB bağlantısı üzerinden firmware yükler. Bir uygulama alanı vardır: Smartwatch ve Düello sırayla yüklenir. Aynı anda saklanmazlar.
+STM32U5A9J-DK için küçük custom bootloader. PC'deki [Device Studio](https://github.com/polite10/DeviceStudio), kartın mevcut ST-LINK Micro USB bağlantısı üzerinden firmware yükler. Bir uygulama alanı vardır: Smartwatch, Düello ve yeni uyumlu firmware’ler sırayla yüklenir. Aynı anda saklanmazlar. DeviceBoot revizyon 2, mevcut UART protokolü 1 ile çalışır.
 
 ## Bellek yerleşimi
 
@@ -16,12 +16,22 @@ Bootloader vektörü `0x08000000`, uygulama vektörü `0x0800A000` adresindedir.
 
 ## Derleme
 
-Bu repo kart SDK'sını kopyalamaz. Yanına [smart_watch](https://github.com/polite10/smart_watch) reposunu `Smartwatch` adıyla koyun. `sdk.lock.json` doğrulanmış commit'i belirtir. Windows / STM32CubeIDE 2.2.0 ARM GCC araçlarıyla:
+Bu repo kart SDK'sını kopyalamaz. Güncel [smart_watch](https://github.com/polite10/smart_watch) çalışma ağacını kardeş klasöre koyun. `smart_watch-main`, `Smartwatch` ve `smart_watch` adları otomatik aranır; farklı yol açıkça verilebilir. SDK içinde bu değişikliklerle eklenen `tools/device_build.py` bulunmalıdır. `sdk.lock.json` yerel SDK'nın temel commit'ini ve gerekli API'yi belirtir; derleme çalışma ağacındaki kaynakları kullanır, Git checkout yapmaz. Eski commit ile güncel DMA API'sini karıştırmayın.
+
+macOS / CubeIDE ARM GCC:
+
+```sh
+python3 build.py
+python3 build.py --smartwatch-root ../smart_watch-main
+```
+
+Windows / Python 3.12+, STM32CubeIDE ARM GCC:
+
 
 ```powershell
 ./Build.ps1
 # Farklı konumdaki SDK:
-./Build.ps1 -SmartwatchRoot C:/projects/Smartwatch
+./Build.ps1 -SmartwatchRoot C:/projects/smart_watch-main
 ```
 
 Çıktılar `Firmware/DeviceBoot.bin` ve `build/DeviceBoot.elf`. İlk kurulum Device Studio'daki **DeviceBoot kur** düğmesiyle ST-LINK/SWD üzerinden yapılır. Kurulum önce tam 4 MiB Flash yedeğini ve SHA-256 değerini yerel `Backup/` içine kaydeder. Ardından yalnız ilk beş Flash sayfasını (bootloader + commit) siler. Saat ayarları korunur. Uygulama, taşınmış `.dfw` paketinden ayrıca yüklenir. Eski `0x08000000` uygulaması bootloader kurulunca çalışamaz.
@@ -39,7 +49,7 @@ Bu repo kart SDK'sını kopyalamaz. Yanına [smart_watch](https://github.com/pol
 
 ST-LINK VCP ↔ USART1 PA9/PA10, bootloader **921600 8N1**, çalışan uygulama **115200 8N1**. Tek USB kablosu yeterlidir. İlk kurulum/teşhis SWD, sonraki uygulama yüklemeleri UART kullanır.
 
-Paket başlığı little-endian: `DBT1` + sıra numarası (`u32`) + komut (`u32`) + payload boyutu (`u32`) + CRC32 (`u32`). CRC başlığın ilk 16 baytı ve payload üzerinden hesaplanır. En fazla 1040 payload baytı kabul edilir. Cevapta komutun bit 31'i set edilir; payload önce durum (`u32`), sonra JSON içerir.
+Paket başlığı little-endian: `DBT1` + sıra numarası (`u32`) + komut (`u32`) + payload boyutu (`u32`) + CRC32 (`u32`). CRC başlığın ilk 16 baytı ve payload üzerinden hesaplanır. En fazla 1040 payload baytı kabul edilir. HELLO/STATUS cevabındaki `version: 2` bootloader revizyonudur; `protocol: 1` değişmez. `max_app_id: 4294967294` genişletilebilir uygulama desteğini bildirir. Descriptor’ın son iki u32 alanı baud ve en büyük uygulama kimliğidir; revizyon 1’de son alan sıfırdır. Cevapta komutun bit 31'i set edilir; payload önce durum (`u32`), sonra JSON içerir.
 
 | Komut | ID | Payload |
 |---|---:|---|
@@ -55,3 +65,17 @@ Stop-and-wait: PC her bloğun ACK'ini bekler. Aynı sıra numarası ve paket CRC
 Bu geliştirme bootloader'ı bütünlük için CRC kullanır; dijital imza, şifreleme veya donanımsal yazma koruması uygulanmaz. UART üzerinden yükleme sınırları SWD erişimini kısıtlamaz.
 
 Gerçek kart doğrulaması Device Studio reposundaki `hardware-report.json` içindedir. Test aracı `verify_hardware.py`, gerçek Flash içeriğini değiştirir ve sonunda Smartwatch'ı geri yükler.
+
+## Yeni firmware kimlikleri
+
+`1` Smartwatch'a, `2` Düello'ya ayrılmıştır; üçüncü firmware için `3` kullanın. Sonrakiler benzersiz `4..0xFFFFFFFE` kimlikleri alabilir. `0` ve silinmiş Flash değeri `0xFFFFFFFF` reddedilir. Kimlik, BEGIN isteği, uygulama descriptor'ı ve commit kaydında eşleşmelidir. Boyut, vektör, CRC ve Flash sınırı denetimleri korunur; uygulama `0x0800A000`, descriptor `+0x400` adresindedir.
+
+Karta kurulu eski revizyon 1 yalnız 1/2 kimliklerini kabul eder. Yeni firmware için önce revizyon 2 binary'sini Studio'dan ST-LINK ile kurun/güncelleyin; bu işlem mevcut tam yedek akışını kullanır. Normal firmware yüklemesi bootloader'ı güncellemez.
+
+Yerel ARM simülasyonu (önce derleyin; `unicorn` ve `pyelftools` gerekir):
+
+```sh
+python3 tests/verify_boot.py
+```
+
+Sonuç `build/verification-local.json` içindedir. UART ve Flash HAL çağrıları taklit edilir; bu test karta yazmaz. Eski `verification.json` ve Studio `hardware-report.json` önceki donanım sürümünün raporlarıdır.
