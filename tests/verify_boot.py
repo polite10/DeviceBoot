@@ -53,8 +53,10 @@ def erase():
     assert META<=address and address+count*8192<=STORE,'Erase escaped allowed region'
     erases.append((address,count));u.mem_write(address,b'\xff'*(count*8192));ret()
 def program():
-    address=reg(1);assert META<=address and address+16<=STORE
-    programs.append(address);u.mem_write(address,bytes(u.mem_read(reg(2),16)));ret()
+    # Quad-word, or a burst of eight (FLASH_NSCR_BWR set) at a 128-byte boundary.
+    size=128 if reg(0)&(1<<14) else 16
+    address=reg(1);assert META<=address and address+size<=STORE and address%size==0
+    programs.append(address);u.mem_write(address,bytes(u.mem_read(reg(2),size)));ret()
 for name in ('HAL_Init','HAL_PWREx_ControlVoltageScaling','HAL_PWREx_ConfigSupply','HAL_RCC_OscConfig',
              'HAL_RCC_ClockConfig','HAL_GPIO_Init','HAL_UART_Init','HAL_FLASH_Unlock','HAL_FLASH_Lock',
              'HAL_UART_DeInit','HAL_RCC_DeInit','HAL_DeInit','HAL_Delay'):
@@ -114,7 +116,7 @@ def transact(raw,command):
     return struct.unpack_from('<I',output,20)[0],json.loads(output[24:])
 def request(command,payload=b''):return transact(frame(command,payload),command)
 status,hello=request(1)
-check(status==0 and hello['version']==3 and hello['catalog'] and hello['protocol']==1 and hello['max_app_id']==MAX_ID,'Revision 3 advertises extensible IDs on protocol 1')
+check(status==0 and hello['version']==4 and hello['catalog'] and hello['protocol']==1 and hello['max_app_id']==MAX_ID,'Revision 4 advertises extensible IDs on protocol 1')
 for app_id in (0,0xffffffff):
     before=len(erases);status,_=request(2,struct.pack('<3I',2048,0,app_id))
     check(status==2 and len(erases)==before,f'Reserved ID {app_id} rejected before erase')
@@ -180,7 +182,13 @@ check(begin(3,data)[0]==0,'UART BEGIN cancels pending selection before erase')
 check(struct.unpack_from('<I',nor,7*8*1024*1024+4096+8)[0]==2,'Cancellation persisted as latest completed record')
 upload_blocks(data);request(4)
 status,_=request(5)
-check(status==0 and started,'RUN reaches third application reset vector')
+launch=struct.unpack('<I',u.mem_read(0x2026fff8,4))[0]
+check(status==0 and reset_requested and launch==0x4C4E4348,'RUN resets with the clean-launch flag')
+# Next boot: the flag sends main straight to the application, before any setup.
+reset_requested=False
+u.reg_write(UC_ARM_REG_SP,0x2026fff0);u.reg_write(UC_ARM_REG_LR,0x0fff0001)
+advance(symbols['main'])
+check(started and struct.unpack('<I',u.mem_read(0x2026fff8,4))[0]==0,'Clean launch reaches third application reset vector')
 check(bytes(u.mem_read(STORE,16384))==saved_journal,'16 KiB settings journal preserved')
 check(bytes(u.mem_read(0x08000000,32768))==saved_boot,'Bootloader Flash preserved')
 report={'scope':'ARM ELF simulation; UART/Flash HAL mocked; no physical board',

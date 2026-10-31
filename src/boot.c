@@ -8,7 +8,7 @@
 #include <stdbool.h>
 
 __attribute__((section(".boot_info"),used))
-const device_boot_info_t boot_info={DEVICE_BOOT_MAGIC,3,DEVICE_APP_BASE,DEVICE_APP_MAX,1,0x481,{921600,DEVICE_APP_ID_MAX}};
+const device_boot_info_t boot_info={DEVICE_BOOT_MAGIC,4,DEVICE_APP_BASE,DEVICE_APP_MAX,1,0x481,{921600,DEVICE_APP_ID_MAX}};
 static UART_HandleTypeDef uart;
 static uint32_t image_size,image_crc,image_id,written;
 static bool updating;
@@ -18,6 +18,9 @@ static uint32_t last_seq,last_request_crc,last_reply_size;
 static bool have_reply;
 static uint32_t crc_table[256];
 static bool nor_ready,storing;
+/* Counting down to the application; the last packet's command. */
+static bool launching;
+static uint32_t handled;
 static uint32_t store_slot,store_written;
 static am_header_t store_header;
 
@@ -96,14 +99,21 @@ static bool program(uint32_t address,const uint8_t *data,uint32_t size) {
     for(uint32_t o=0;o<size && ok;o+=16)ok=HAL_FLASH_Program(FLASH_TYPEPROGRAM_QUADWORD,address+o,(uint32_t)(data+o))==HAL_OK;
     HAL_FLASH_Lock();return ok && !memcmp((const void *)address,data,size);
 }
-static void jump_app(void) __attribute__((noreturn));
-static void jump_app(void) {
-    uint32_t sp=*(const uint32_t *)DEVICE_APP_BASE,pc=*(const uint32_t *)(DEVICE_APP_BASE+4);
+/* The application always starts from a fresh reset: nothing this boot set up
+ * (NOR port and pins, clocks, UART) reaches it. The flag survives the reset in
+ * RAM; the next boot jumps before initialising anything. */
+static void launch_app(void) __attribute__((noreturn));
+static void launch_app(void) {
+    DEVICE_MAILBOX[2]=DEVICE_LAUNCH_MAGIC;
     if(nor_ready)am_nor_deinit();
-    HAL_UART_DeInit(&uart);HAL_RCC_DeInit();HAL_DeInit();
-    __disable_irq();SysTick->CTRL=0;SysTick->LOAD=0;SysTick->VAL=0;
-    for(unsigned i=0;i<16;++i){NVIC->ICER[i]=0xFFFFFFFF;NVIC->ICPR[i]=0xFFFFFFFF;}
-    SCB->ICSR=SCB_ICSR_PENDSTCLR_Msk|SCB_ICSR_PENDSVCLR_Msk;SCB->VTOR=DEVICE_APP_BASE;
+    HAL_UART_DeInit(&uart);
+    __DSB();NVIC_SystemReset();
+    while(1){}
+}
+static void start_app(void) __attribute__((noreturn));
+static void start_app(void) {
+    uint32_t sp=*(const uint32_t *)DEVICE_APP_BASE,pc=*(const uint32_t *)(DEVICE_APP_BASE+4);
+    __disable_irq();SCB->VTOR=DEVICE_APP_BASE;
     __DSB();__ISB();
     /* A naked assembly tail avoids C stack accesses after changing MSP. */
     __asm volatile("msr control, %0\n msr msp, %1\n isb\n cpsie i\n bx %2"::"r"(0U),"r"(sp),"r"(pc):"memory");
@@ -123,8 +133,8 @@ static void dispatch(uint32_t *h) {
     uint32_t cmd=h[2],n=h[3],status=0;char out[240]="{}";
     if(cmd==1 || cmd==6) {
         const device_meta_t *m=(const device_meta_t *)DEVICE_META_BASE;
-        snprintf(out,sizeof out,"{\"app\":\"DeviceBoot\",\"version\":3,\"protocol\":1,\"base\":%lu,\"max\":%lu,\"valid\":%s,\"image_id\":%lu,\"written\":%lu,\"max_app_id\":%lu,\"catalog\":%s}",
-          (unsigned long)DEVICE_APP_BASE,(unsigned long)DEVICE_APP_MAX,app_valid()?"true":"false",(unsigned long)(m->magic==DEVICE_META_MAGIC?m->id:0),(unsigned long)written,(unsigned long)DEVICE_APP_ID_MAX,nor_ready?"true":"false");
+        snprintf(out,sizeof out,"{\"app\":\"DeviceBoot\",\"version\":4,\"protocol\":1,\"base\":%lu,\"max\":%lu,\"valid\":%s,\"image_id\":%lu,\"written\":%lu,\"max_app_id\":%lu,\"catalog\":%s,\"launching\":%s}",
+          (unsigned long)DEVICE_APP_BASE,(unsigned long)DEVICE_APP_MAX,app_valid()?"true":"false",(unsigned long)(m->magic==DEVICE_META_MAGIC?m->id:0),(unsigned long)written,(unsigned long)DEVICE_APP_ID_MAX,nor_ready?"true":"false",launching?"true":"false");
     } else if(cmd==2) {
         if(n!=12)status=1;
         else {
@@ -162,7 +172,7 @@ static void dispatch(uint32_t *h) {
         updating=false;
     } else if(cmd==5) {
         if(updating || !app_valid())status=6;
-        else {reply(h[1],cmd,h[4],0,"{\"starting\":true}");HAL_Delay(30);jump_app();}
+        else {reply(h[1],cmd,h[4],0,"{\"starting\":true}");HAL_Delay(30);launch_app();}
     } else if(cmd==7) {updating=false;storing=false;strcpy(out,"{\"aborted\":true}");}
     else if(cmd==8) {
         uint32_t slot=AM_SLOT_COUNT;am_header_t h;
@@ -235,22 +245,58 @@ static bool packet(void) {
     if(h[3] && HAL_UART_Receive(&uart,payload,h[3],1500)!=HAL_OK)return false;
     uint32_t crc=~device_crc_update(device_crc_update(0xFFFFFFFFU,(uint8_t *)h,16),payload,h[3]);
     if(crc!=h[4])return false;
+    handled=h[2];
     if(have_reply && h[1]==last_seq && h[4]==last_request_crc)transmit_reply();
     else dispatch(h);
     return true;
 }
+static bool vectors_present(void) {
+    const device_meta_t *m=(const device_meta_t *)DEVICE_META_BASE;
+    return m->magic==DEVICE_META_MAGIC && vectors_valid(m->size,m->id);
+}
+/* Green LED (PE0) blinks while an application is copied from NOR. */
+static void led_init(void) {
+    __HAL_RCC_GPIOE_CLK_ENABLE();
+    GPIO_InitTypeDef g={.Pin=GPIO_PIN_0,.Mode=GPIO_MODE_OUTPUT_PP,.Pull=GPIO_NOPULL,.Speed=GPIO_SPEED_FREQ_LOW};
+    HAL_GPIO_Init(GPIOE,&g);
+}
+void am_port_progress(void) {
+    static uint32_t last;
+    if(HAL_GetTick()-last>=150){last=HAL_GetTick();HAL_GPIO_TogglePin(GPIOE,GPIO_PIN_0);}
+}
 int main(void) {
+    /* Second half of a launch: the previous boot did its work and reset. */
+    if(DEVICE_MAILBOX[2]==DEVICE_LAUNCH_MAGIC) {
+        DEVICE_MAILBOX[2]=0;
+        if(vectors_present())start_app();
+    }
     bool requested=DEVICE_MAILBOX[0]==DEVICE_REQUEST_MAGIC && DEVICE_MAILBOX[1]==~DEVICE_REQUEST_MAGIC;
     DEVICE_MAILBOX[0]=DEVICE_MAILBOX[1]=0;
     HAL_Init();clock_init();crc_init();uart_init();
-    nor_ready=am_nor_init()==0;
     bool user=HAL_GPIO_ReadPin(GPIOC,GPIO_PIN_13)==GPIO_PIN_SET;
-    /* USER/BOOT recovery deliberately bypasses pending installation. */
-    int resumed=AM_IDLE;
-    if(nor_ready && !requested && !user)resumed=am_resume(&am_stm32_io);
-    bool stay=requested || user || resumed<0 || !app_valid();
+    nor_ready=am_nor_init()==0;
+    /* USER/BOOT recovery deliberately bypasses pending installation. A failed
+     * resume never strands a valid application: it starts, and the pending
+     * request is retried on the next boot. */
+    if(nor_ready && !requested && !user) {
+        led_init();
+        int resumed=am_resume(&am_stm32_io);
+        HAL_GPIO_WritePin(GPIOE,GPIO_PIN_0,GPIO_PIN_SET);
+        const device_meta_t *m=(const device_meta_t *)DEVICE_META_BASE;
+        if((resumed==AM_OK || resumed==AM_ALREADY_INSTALLED) && m->magic==DEVICE_META_MAGIC)
+            DEVICE_MAILBOX[3]=device_opened_token(m->id);
+    }
+    bool stay=requested || user || !app_valid();
+    /* A HELLO/STATUS probe (a PC connecting while the board powers up) is
+     * answered with launching=true and never holds the application back;
+     * only real bootloader work keeps this window open. */
+    launching=!stay;
     uint32_t start=HAL_GetTick();
-    while(!stay && HAL_GetTick()-start<900){if(packet())stay=true;if(HAL_GPIO_ReadPin(GPIOC,GPIO_PIN_13)==GPIO_PIN_SET)stay=true;}
-    if(!stay)jump_app();
+    while(!stay && HAL_GetTick()-start<900){
+        if(packet() && handled!=1 && handled!=6)stay=true;
+        if(HAL_GPIO_ReadPin(GPIOC,GPIO_PIN_13)==GPIO_PIN_SET)stay=true;
+    }
+    launching=false;
+    if(!stay)launch_app();
     while(1)packet();
 }
