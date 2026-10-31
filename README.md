@@ -98,6 +98,15 @@ kurtarma yolu korunur. USER basılıyken RESET veya runtime BOOT kurtarma modunu
 [komut protokolü](https://github.com/polite10/AppManager/blob/main/docs/protocol.md). Bu entegrasyon yazılım ve
 emülasyon düzeyinde doğrulanmıştır; fiziksel NOR/kurulum testi henüz yapılmamıştır.
 
+## Revizyon 4: her açılışta uygulama seçimi — 1 Kasım 2026
+
+- Kart her güç verilişinde ve her resette uygulama seçme ekranıyla açılır (ekranı çalışan uygulama çizer). Çalışan uygulamaya dokunmak ekranı kapatır; başka bir uygulamaya dokunmak onu NOR'dan kurar ve doğrudan açar. Bir sonraki resette yine seçme ekranı gelir.
+- Bootloader uygulamayı her zaman temiz bir sistem resetiyle başlatır: RAM'deki başlatma işareti (`0x2026FFF8`) görülünce hiçbir donanım kurulmadan uygulamaya atlanır. NOR için açılan port, pinler ve saatler uygulamaya taşınmaz.
+- 900 ms açılış penceresinde gelen HELLO/STATUS yoklaması bootloader'ı tutmaz; `launching:true` ile cevaplanır ve uygulama yine açılır. Studio bu cevabı görünce uygulamayı bekler. Önceki sürümde kablo takılırken Studio'nun yoklaması kartı kurtarma modunda (siyah ekran) bırakabiliyordu; soğuk açılış arızasının sebebi buydu.
+- NOR okunamazsa veya bekleyen kurulum başarısız olursa geçerli uygulama yine başlar; istek bir sonraki açılışta tekrar denenir. Yalnız USER+RESET, runtime BOOT veya geçersiz uygulama kurtarma modunu açar.
+- Kurulum 8 KiB sayfa sayfa yapılır: aynı içerikteki sayfalar silinmez ve yazılmaz. Yazma 128 baytlık burst modundadır, NOR 40 MHz okunur. Ölçülen geçişler: Düello ≈7 s, ADASLab ≈10 s, Smartwatch ≈30 s (tam yeniden yazım; daha önce kuruluysa ≈19 s). Kurulum sırasında ekran kararır, yeşil LED (PE0) yanıp söner.
+- Kurulan uygulama, RAM'deki tek kullanımlık işaretle (`0x2026FFFC`) seçme ekranı göstermeden açılır.
+
 ## Fiziksel uygulama yöneticisi doğrulaması — 31 Ekim2026
 
 DeviceBoot v3 ve üç uygulama NOR deposu karta yüklendi. Menü üzerinden geçişler,
