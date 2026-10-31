@@ -1,12 +1,14 @@
 /* DeviceBoot: one application slot; UART stop-and-wait updates. */
 #include "stm32u5xx_hal.h"
 #include "device_contract.h"
+#include "am_port.h"
+#include "am_nor_stm32.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
 
 __attribute__((section(".boot_info"),used))
-const device_boot_info_t boot_info={DEVICE_BOOT_MAGIC,2,DEVICE_APP_BASE,DEVICE_APP_MAX,1,0x481,{921600,DEVICE_APP_ID_MAX}};
+const device_boot_info_t boot_info={DEVICE_BOOT_MAGIC,3,DEVICE_APP_BASE,DEVICE_APP_MAX,1,0x481,{921600,DEVICE_APP_ID_MAX}};
 static UART_HandleTypeDef uart;
 static uint32_t image_size,image_crc,image_id,written;
 static bool updating;
@@ -15,6 +17,9 @@ static uint8_t last_response[280];
 static uint32_t last_seq,last_request_crc,last_reply_size;
 static bool have_reply;
 static uint32_t crc_table[256];
+static bool nor_ready,storing;
+static uint32_t store_slot,store_written;
+static am_header_t store_header;
 
 uint32_t device_crc_update(uint32_t crc,const uint8_t *p,uint32_t n) {
     while(n--) crc=crc_table[(crc^*p++)&255]^(crc>>8);
@@ -94,6 +99,7 @@ static bool program(uint32_t address,const uint8_t *data,uint32_t size) {
 static void jump_app(void) __attribute__((noreturn));
 static void jump_app(void) {
     uint32_t sp=*(const uint32_t *)DEVICE_APP_BASE,pc=*(const uint32_t *)(DEVICE_APP_BASE+4);
+    if(nor_ready)am_nor_deinit();
     HAL_UART_DeInit(&uart);HAL_RCC_DeInit();HAL_DeInit();
     __disable_irq();SysTick->CTRL=0;SysTick->LOAD=0;SysTick->VAL=0;
     for(unsigned i=0;i<16;++i){NVIC->ICER[i]=0xFFFFFFFF;NVIC->ICPR[i]=0xFFFFFFFF;}
@@ -117,14 +123,17 @@ static void dispatch(uint32_t *h) {
     uint32_t cmd=h[2],n=h[3],status=0;char out[240]="{}";
     if(cmd==1 || cmd==6) {
         const device_meta_t *m=(const device_meta_t *)DEVICE_META_BASE;
-        snprintf(out,sizeof out,"{\"app\":\"DeviceBoot\",\"version\":2,\"protocol\":1,\"base\":%lu,\"max\":%lu,\"valid\":%s,\"image_id\":%lu,\"written\":%lu,\"max_app_id\":%lu}",
-          (unsigned long)DEVICE_APP_BASE,(unsigned long)DEVICE_APP_MAX,app_valid()?"true":"false",(unsigned long)(m->magic==DEVICE_META_MAGIC?m->id:0),(unsigned long)written,(unsigned long)DEVICE_APP_ID_MAX);
+        snprintf(out,sizeof out,"{\"app\":\"DeviceBoot\",\"version\":3,\"protocol\":1,\"base\":%lu,\"max\":%lu,\"valid\":%s,\"image_id\":%lu,\"written\":%lu,\"max_app_id\":%lu,\"catalog\":%s}",
+          (unsigned long)DEVICE_APP_BASE,(unsigned long)DEVICE_APP_MAX,app_valid()?"true":"false",(unsigned long)(m->magic==DEVICE_META_MAGIC?m->id:0),(unsigned long)written,(unsigned long)DEVICE_APP_ID_MAX,nor_ready?"true":"false");
     } else if(cmd==2) {
         if(n!=12)status=1;
         else {
             uint32_t p[3];memcpy(p,payload,12);
             if(p[0]<0x410 || p[0]>DEVICE_APP_MAX || !device_app_id_valid(p[2]))status=2;
+            /* An independent upload must not leave an old install pending. */
+            else if(!nor_ready || am_cancel(&am_stm32_io)<0)status=3;
             else {
+                storing=false;
                 updating=false;written=0;
                 /* Invalidate BEFORE touching application pages. Interrupted uploads stay in recovery. */
                 if(!erase_range(DEVICE_META_BASE,8192) || !erase_range(DEVICE_APP_BASE,p[0]))status=3;
@@ -154,7 +163,63 @@ static void dispatch(uint32_t *h) {
     } else if(cmd==5) {
         if(updating || !app_valid())status=6;
         else {reply(h[1],cmd,h[4],0,"{\"starting\":true}");HAL_Delay(30);jump_app();}
-    } else if(cmd==7) {updating=false;strcpy(out,"{\"aborted\":true}");}
+    } else if(cmd==7) {updating=false;storing=false;strcpy(out,"{\"aborted\":true}");}
+    else if(cmd==8) {
+        uint32_t slot=AM_SLOT_COUNT;am_header_t h;
+        if(n==4)memcpy(&slot,payload,4);
+        if(!nor_ready || am_read_header(&am_stm32_io,slot,&h)!=AM_OK)status=2;
+        else snprintf(out,sizeof out,"{\"slot\":%lu,\"id\":%lu,\"version\":%lu,\"size\":%lu,\"crc\":%lu}",
+          (unsigned long)slot,(unsigned long)h.id,(unsigned long)h.version,(unsigned long)h.size,(unsigned long)h.image_crc);
+    } else if(cmd==9) {
+        uint32_t p[5]={0};
+        if(n==48)memcpy(p,payload,20);
+        if(!nor_ready || n!=48 || p[0]>=AM_SLOT_COUNT || p[1]<0x410 || p[1]>AM_APP_MAX ||
+           !device_app_id_valid(p[3]) || !p[4] || !memchr(payload+20,0,28))status=2;
+        else if(updating || am_cancel(&am_stm32_io)<0)status=4;
+        else {
+            storing=false;store_slot=p[0];store_written=0;
+            store_header=(am_header_t){.magic=AM_HEADER_MAGIC,.format=1,.id=p[3],.version=p[4],
+                .size=p[1],.image_crc=p[2],.base=AM_APP_BASE,.protocol=1};
+            memcpy(store_header.name,payload+20,28);
+            /* Invalidate the old catalog header before altering its image. */
+            uint32_t end=AM_IMAGE_OFFSET+((p[1]+4095u)&~4095u);
+            for(uint32_t offset=0;offset<end && !status;offset+=4096)
+                if(am_nor_erase4k(store_slot*AM_SLOT_SIZE+offset))status=3;
+            storing=status==0;
+        }
+    } else if(cmd==10) {
+        uint32_t offset=0;if(n>=4)memcpy(&offset,payload,4);
+        uint32_t bytes=n>=4?n-4:0;
+        if(!storing || !bytes || bytes>1024 || offset!=store_written || bytes>store_header.size-store_written)status=4;
+        else if(am_nor_program(store_slot*AM_SLOT_SIZE+AM_IMAGE_OFFSET+offset,payload+4,bytes)){status=3;storing=false;}
+        else store_written+=bytes;
+        snprintf(out,sizeof out,"{\"written\":%lu}",(unsigned long)store_written);
+    } else if(cmd==11) {
+        if(n || !storing || store_written!=store_header.size)status=4;
+        else {
+            uint32_t crc=0xFFFFFFFFu;
+            for(uint32_t offset=0;offset<store_written && !status;){
+                uint32_t bytes=store_written-offset;if(bytes>sizeof payload)bytes=sizeof payload;
+                if(am_nor_read(store_slot*AM_SLOT_SIZE+AM_IMAGE_OFFSET+offset,payload,bytes))status=3;
+                else crc=device_crc_update(crc,payload,bytes);
+                offset+=bytes;
+            }
+            if(!status && ~crc!=store_header.image_crc)status=5;
+            store_header.header_crc=am_crc32(&store_header,60);
+            if(!status && am_nor_program(store_slot*AM_SLOT_SIZE,&store_header,sizeof store_header))status=3;
+            am_header_t check;
+            if(!status && am_validate_slot(&am_stm32_io,store_slot,&check)!=AM_OK){
+                status=5;(void)am_nor_erase4k(store_slot*AM_SLOT_SIZE);
+            }
+            if(!status)strcpy(out,"{\"verified\":true}");
+        }
+        storing=false;
+    } else if(cmd==12) {
+        uint32_t slot=AM_SLOT_COUNT;if(n==4)memcpy(&slot,payload,4);
+        if(updating || storing)status=4;
+        else if(!nor_ready || n!=4 || am_request(&am_stm32_io,slot)!=AM_OK)status=5;
+        else {reply(h[1],cmd,h[4],0,"{\"installing\":true}");HAL_Delay(30);NVIC_SystemReset();}
+    }
     else status=1;
     reply(h[1],cmd,h[4],status,out);
 }
@@ -178,7 +243,12 @@ int main(void) {
     bool requested=DEVICE_MAILBOX[0]==DEVICE_REQUEST_MAGIC && DEVICE_MAILBOX[1]==~DEVICE_REQUEST_MAGIC;
     DEVICE_MAILBOX[0]=DEVICE_MAILBOX[1]=0;
     HAL_Init();clock_init();crc_init();uart_init();
-    bool stay=requested || HAL_GPIO_ReadPin(GPIOC,GPIO_PIN_13)==GPIO_PIN_SET || !app_valid();
+    nor_ready=am_nor_init()==0;
+    bool user=HAL_GPIO_ReadPin(GPIOC,GPIO_PIN_13)==GPIO_PIN_SET;
+    /* USER/BOOT recovery deliberately bypasses pending installation. */
+    int resumed=AM_IDLE;
+    if(nor_ready && !requested && !user)resumed=am_resume(&am_stm32_io);
+    bool stay=requested || user || resumed<0 || !app_valid();
     uint32_t start=HAL_GetTick();
     while(!stay && HAL_GetTick()-start<900){if(packet())stay=true;if(HAL_GPIO_ReadPin(GPIOC,GPIO_PIN_13)==GPIO_PIN_SET)stay=true;}
     if(!stay)jump_app();

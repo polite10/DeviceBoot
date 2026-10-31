@@ -1,6 +1,6 @@
 # DeviceBoot
 
-STM32U5A9J-DK için küçük custom bootloader. PC'deki [Device Studio](https://github.com/polite10/DeviceStudio), kartın mevcut ST-LINK Micro USB bağlantısı üzerinden firmware yükler. Bir uygulama alanı vardır: Smartwatch, Düello ve yeni uyumlu firmware’ler sırayla yüklenir. Aynı anda saklanmazlar. DeviceBoot revizyon 2, mevcut UART protokolü 1 ile çalışır.
+STM32U5A9J-DK için küçük custom bootloader. PC'deki [Device Studio](https://github.com/polite10/DeviceStudio), kartın mevcut ST-LINK Micro USB bağlantısı üzerinden firmware yükler. Dahili Flash’ta tek çalışan uygulama alanı vardır. Revizyon 3, kartın üzerindeki NOR bellekte yedi uygulama saklayıp seçileni bu alana kurabilir. Mevcut UART protokolü 1 ve uygulama adresi korunur.
 
 ## Bellek yerleşimi
 
@@ -79,3 +79,28 @@ python3 tests/verify_boot.py
 ```
 
 Sonuç `build/verification-local.json` içindedir. UART ve Flash HAL çağrıları taklit edilir; bu test karta yazmaz. Eski `verification.json` ve Studio `hardware-report.json` önceki donanım sürümünün raporlarıdır.
+
+## Uygulama yöneticisi — 31 Ekim 2026
+
+Ortak SDK ile derlenen Smartwatch/Düello/ADASLab uygulamalarında USER butonunu
+1,5 saniye basılı tutmak veya runtime `APPS` komutunu göndermek seçim menüsünü
+açar. Menüde seçim/onay sonrası kalıcı istek yazılır, resetlenir ve seçilen
+NOR görüntüsü dahili Flash’a kurulur. Güncel uygulamalar, `.dfw` paketleri ve
+katalog kardeş AppManager/tools/build_catalog.py ile birlikte üretilir.
+
+32KiB bootloader, 8KiB commit alanı, `0x0800A000` uygulama başlangıcı ve son16KiB
+saat günlüğü korunur. Güç kesintisinde kurulum iki dönüşümlü NOR kaydından
+yeniden başlar; eski uygulamaya otomatik rollback yoktur. NOR okunamıyorsa
+bekleyen isteğin iptali doğrulanamayacağından UART BEGIN reddedilir; SWD
+kurtarma yolu korunur. USER basılıyken RESET veya runtime BOOT kurtarma modunu açar.
+
+[Uygulama yöneticisi ve testler](https://github.com/polite10/AppManager/blob/main/README.md),
+[komut protokolü](https://github.com/polite10/AppManager/blob/main/docs/protocol.md). Bu entegrasyon yazılım ve
+emülasyon düzeyinde doğrulanmıştır; fiziksel NOR/kurulum testi henüz yapılmamıştır.
+
+## Fiziksel uygulama yöneticisi doğrulaması — 31 Ekim2026
+
+DeviceBoot v3 ve üç uygulama NOR deposu karta yüklendi. Menü üzerinden geçişler,
+güncel ADAS modları ve boot/saat alanlarının korunması fiziksel kartta doğrulandı.
+Ortak modül [AppManager](https://github.com/polite10/AppManager) kardeş klasörde
+bulunmalıdır. [Donanım raporu](https://github.com/polite10/AppManager/blob/main/reports/hardware-verification.json).
