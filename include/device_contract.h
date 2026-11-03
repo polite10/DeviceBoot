@@ -9,6 +9,19 @@
 #define DEVICE_APP_MAX (DEVICE_STORE_BASE-DEVICE_APP_BASE)
 #define DEVICE_RAM_END 0x2026FFF0U
 #define DEVICE_MAILBOX ((volatile uint32_t *)DEVICE_RAM_END)
+/* Mailbox words 2 and 3 (bootloader v4): a clean-launch flag the bootloader
+ * sets before resetting into the application, and the application it has just
+ * installed, which then opens straight into its own screen instead of the
+ * application picker. Power loss clears both. */
+#define DEVICE_LAUNCH_MAGIC 0x4C4E4348U
+#define DEVICE_OPENED_MAGIC 0x4F50454EU
+static inline uint32_t device_opened_token(uint32_t id) { return DEVICE_OPENED_MAGIC ^ (id * 0x9E3779B1U); }
+/* True once, in the application the bootloader has just installed. */
+static inline int device_take_opened(uint32_t id) {
+    int own=DEVICE_MAILBOX[3]==device_opened_token(id);
+    DEVICE_MAILBOX[3]=0;
+    return own;
+}
 #define DEVICE_BOOT_MAGIC 0x44425631U
 #define DEVICE_APP_MAGIC 0x44415631U
 #define DEVICE_META_MAGIC 0x444D5631U
@@ -16,6 +29,11 @@
 #define DEVICE_PROTOCOL 1U
 #define DEVICE_APP_WATCH 1U
 #define DEVICE_APP_DUELLO 2U
+/* 0 and erased Flash (UINT32_MAX) are not application identities. */
+#define DEVICE_APP_ID_MAX 0xFFFFFFFEU
+static inline int device_app_id_valid(uint32_t id) {
+    return id > 0U && id <= DEVICE_APP_ID_MAX;
+}
 typedef struct { uint32_t magic,version,base,max_size,protocol,board,reserved[2]; } device_boot_info_t;
 typedef struct { uint32_t magic,id,version,protocol; } device_app_info_t;
 typedef struct { uint32_t magic,size,crc,id; } device_meta_t;

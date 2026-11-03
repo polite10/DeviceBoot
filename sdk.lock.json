@@ -1,5 +1,12 @@
 {
   "repository": "https://github.com/polite10/smart_watch.git",
-  "commit": "190e65da2ce6a29d567e51760ab938eaddbb1965",
-  "directory": "Smartwatch"
+  "commit": "66edf56b6c79213d25c594822440663e03634dfe",
+  "directory": "smart_watch-main",
+  "directory_candidates": [
+    "smart_watch-main",
+    "Smartwatch",
+    "smart_watch"
+  ],
+  "runtime_api": "shared-dma-v2",
+  "build_helper": "tools/device_build.py"
 }
